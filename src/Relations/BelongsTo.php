@@ -1,7 +1,7 @@
 <?php
 /**
- * 一对多
- * User: Siam
+ * 一对多(逆向)
+ * User: kwdd
  * Date: 2020/2/27
  * Time: 11:21
  */
@@ -13,29 +13,30 @@ use EasySwoole\Mysqli\QueryBuilder;
 use EasySwoole\ORM\AbstractModel;
 use EasySwoole\ORM\Exception\Exception;
 use EasySwoole\ORM\Utility\FieldHandle;
+use EasySwoole\ORM\DbManager;
 
-class HasMany
+class BelongsTo
 {
     private $fatherModel;
-    private $childModelName;
+    private $childModel;
 
     public function __construct(AbstractModel $model, $class)
     {
-        $this->fatherModel = $model;
-        $this->childModelName = $class;
+        $this->childModel = $model;
+        $this->fatherModel = $class;
     }
 
     /**
      * @param $where
-     * @param $pk
      * @param $joinPk
+     * @param $otherPk
      * @param $joinType
      * @return mixed
      * @throws \Throwable
      */
-    public function result($where, $pk, $joinPk, $joinType)
+    public function result($where, $joinPk, $otherPk, $joinType)
     {
-        $ref = new \ReflectionClass($this->childModelName);
+        $ref = new \ReflectionClass($this->fatherModel);
 
         if (!$ref->isSubclassOf(AbstractModel::class)) {
             throw new Exception("relation class must be subclass of AbstractModel");
@@ -44,38 +45,44 @@ class HasMany
         /** @var AbstractModel $ins */
         $ins = $ref->newInstance();
         $builder = new QueryBuilder();
-
-        if ($pk === null) {
-            $pk = $this->fatherModel->schemaInfo()->getPkFiledName();
-        }
-        if ($joinPk === null) {
-            $joinPk = $ins->schemaInfo()->getPkFiledName();
-        }
-
         $targetTable = $ins->schemaInfo()->getTable();
-        $currentTable = $this->fatherModel->schemaInfo()->getTable();
+        $currentTable = $this->childModel->schemaInfo()->getTable();
+        $pk = $this->childModel->schemaInfo()->getPkFiledName();
+
+        if ($joinPk === null) {
+            $dbName = DbManager::getInstance()->getConnection()->getConfig()->getDatabase();
+            $queryBuilder = new QueryBuilder();
+            $queryBuilder->raw("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA='{$dbName}' AND TABLE_NAME='{$targetTable}' AND REFERENCED_TABLE_NAME='{$currentTable}' AND CONSTRAINT_NAME like 'fk_%';");
+            $tableColumns = DbManager::getInstance()->query($queryBuilder, $raw = true, 'default');
+            if (!empty($tableColumns->getResult())) {
+                $joinPk = $tableColumns->getResult()[0]['COLUMN_NAME'];
+            } else {
+                return null;
+            }
+        }
+        if ($otherPk === null) {
+            $otherPk = $ins->schemaInfo()->getPkFiledName();
+        }
 
         // 支持复杂的构造
         if ($where) {
             /** @var QueryBuilder $builder */
             $builder = call_user_func($where, $builder);
-            $this->fatherModel->preHandleQueryBuilder($builder);
-            $builder->get($targetTable, null, $builder->getField());
+            $this->childModel->preHandleQueryBuilder($builder);
+            $builder->get($currentTable, null, $builder->getField());
         } else {
             $targetTableAlias = "ES_INS";
             // 关联表字段自动别名
-            $fields = FieldHandle::parserRelationFields($this->fatherModel, $ins, $targetTableAlias);
+            $fields = FieldHandle::parserRelationFields($this->childModel, $ins, $targetTableAlias);
 
-            $builder->join($targetTable." AS {$targetTableAlias}", "{$targetTableAlias}.{$joinPk} = {$currentTable}.{$pk}", $joinType)
-                ->where("{$currentTable}.{$pk}", $this->fatherModel->$pk);
-            $this->fatherModel->preHandleQueryBuilder($builder);
+            $builder->join($targetTable." AS {$targetTableAlias}", "{$targetTableAlias}.{$otherPk} = {$currentTable}.{$joinPk}", $joinType)
+                ->where("{$currentTable}.{$pk}", $this->childModel->$pk);
+            $this->childModel->preHandleQueryBuilder($builder);
             $builder->get($currentTable, null, $fields);
         }
 
-        $result = $this->fatherModel->query($builder);
-
+        $result = $this->childModel->query($builder);
         if ($result) {
-            $return = [];
             foreach ($result as $one) {
                 // 分离结果 两个数组
                 $targetData = [];
@@ -94,12 +101,12 @@ class HasMany
                         $targetData[$key] = $value;
                     }
                 }
-                $return[] = ($ref->newInstance())->data($targetData);
+                $return = ($ref->newInstance())->data($targetData);
             }
 
             return $return;
         }
-        return [];
+        return null;
     }
 
 
@@ -107,14 +114,14 @@ class HasMany
      * @param array $data 原始数据 进入这里的处理都是多条 all查询结果
      * @param $withName string 预查询字段名
      * @param $where
-     * @param $pk
      * @param $joinPk
+     * @param $otherPk
      * @param $joinType
      * @return array
      * @throws Exception
      * @throws \Throwable
      */
-    public function preHandleWith(array $data, $withName, $where, $pk, $joinPk, $joinType)
+    public function preHandleWith(array $data, $withName, $where, $joinPk, $otherPk, $joinType)
     {
         // 如果闭包不为空，则只能执行闭包
         if ($where !== null && is_callable($where)){
@@ -129,22 +136,22 @@ class HasMany
 
         // 需要先提取主键数组，select 副表 where joinPk in (pk arrays);
         // foreach 判断主键，设置值
-        $pks = array_map(function ($v) use ($pk){
-            return $v->$pk;
+        $joinPks = array_map(function ($v) use ($joinPk){
+            return $v->$joinPk;
         }, $data);
-        $pks = array_values(array_unique($pks));
+        $joinPks = array_values(array_unique($joinPks));
 
         /** @var AbstractModel $insClass */
-        $insClass = new $this->childModelName;
-        $insData  = $insClass->where($joinPk, $pks, 'IN')->all();
+        $insClass = new $this->childModel;
+        $insData  = $insClass->where($otherPk, $joinPks, 'IN')->all();
         $temData  = [];
         foreach ($insData as $insK => $insV){
-            $temData[$insV[$joinPk]][] = $insV;
+            $temData[$insV[$otherPk]][] = $insV;
         }
         foreach ($data as $model){
             $model[$withName] = [];
-            if (isset($temData[$model[$pk]])){ // 如果在二维数组中，有属于A表模型主键的，那么就是它的子数据
-                $model[$withName] = $temData[$model[$pk]];
+            if (isset($temData[$model[$joinPk]])){ // 如果在二维数组中，有属于A表模型主键的，那么就是它的子数据
+                $model[$withName] = $temData[$model[$joinPk]];
             }
         }
 

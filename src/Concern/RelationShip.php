@@ -6,6 +6,7 @@ use EasySwoole\ORM\AbstractModel;
 use EasySwoole\ORM\Db\Cursor;
 use EasySwoole\ORM\Exception\Exception;
 use EasySwoole\ORM\Relations\BelongsToMany;
+use EasySwoole\ORM\Relations\BelongsTo;
 use EasySwoole\ORM\Relations\HasMany;
 use EasySwoole\ORM\Relations\HasOne;
 
@@ -71,6 +72,30 @@ trait RelationShip
     }
 
     /**
+     * 一对多(逆向)关联
+     * @param string        $class
+     * @param callable|null $where
+     * @param null          $joinPk
+     * @param null          $otherPk
+     * @param string        $joinType
+     * @return mixed|null
+     * @throws
+     */
+    protected function belongsTo(string $class, callable $where = null, $joinPk = null, $otherPk = null, $joinType = '')
+    {
+        if ($this->preHandleWith === true){
+            return [$class, $where, $joinPk, $otherPk, $joinType, 'belongsTo'];
+        }
+        $fileName = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1]['function'];
+        if (isset($this->_joinData[$fileName])) {
+            return $this->_joinData[$fileName];
+        }
+        $result = (new BelongsTo($this, $class))->result($where, $joinPk, $otherPk, $joinType);
+        $this->_joinData[$fileName] = $result;
+        return $result;
+    }
+
+    /**
      * 多对多关联
      * @param string $class
      * @param $middleTableName
@@ -114,7 +139,7 @@ trait RelationShip
             foreach ($this->with as $with){
                 $data[0]->preHandleWith = true;
                 list($class, $where, $pk, $joinPk, $joinType, $withType) = $data[0]->$with();
-                if (!in_array($withType, ['hasOne', 'hasMany'])) {
+                if (!in_array($withType, ['hasOne', 'hasMany', 'belongsTo'])) {
                     list($class, $middleTableName, $where, $foreignPivotKey, $relatedPivotKey, $parentKey, $relatedKey, $joinType, $withType) = $data[0]->$with();
                 }
                 $data[0]->preHandleWith = false;
